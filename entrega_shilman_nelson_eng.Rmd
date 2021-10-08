@@ -1,0 +1,224 @@
+---
+title: "Product Design Segmentation via Conjoint Analysis"
+author: "Nelson Shilman"
+date: "10/8/2021"
+output: pdf_document
+---
+
+```{r, include=FALSE}
+library(conjoint)
+library(tidyverse)
+library(rio)
+library(fastDummies)
+library(ggthemes)
+library(gridExtra)
+library(factoextra)
+library(NbClust)
+library(knitr)
+library(kableExtra)
+```
+
+
+The complete project can be cloned from Github! at this [link](https://github.com/nelson-io/BADA-final)
+
+## Study Design
+
+In this study I'll use conjoint analysis in order to expose the latent personal preferences regarding what we look after when buying an e-reader (Kindle branded).
+
+In this fashion, I first assumed which where the main attributes most customers look after when deciding to buy an e-reader, which I guessed where the screen size, backlit screen, water resistance, internal memory and price.
+  
+After choosing those attributes, I identified possible levels for each attribute:
+
+  * Screen size: *6-inches, 8-inches, 10-inches*
+  * Backlit screen: *with, without*
+  * Water resistance: *with, without*
+  * Internal memory: *4GB, 8GB, 16GB, 32GB*
+  * Price: *80 USD, 120 USD, 160 USD, 200 USD*
+  
+Then I proceded to elaborate an orthogonal experimental design which is documented at the file *orthogonal_design.R* and can be consumed from the file *factorialDesign.csv*.
+
+## Survey
+
+The file *orthogonal_design.R* also prints each alternative shown on the factorial design  and its used to populate a survey made with Google Forms.
+
+The survey is closed but an exact copy can be accessed at the following [link.](https://forms.gle/eEAoDXX7CEgKTgni7)
+
+Additionally, the 39 obtained responses can be downloaded from this [link](https://docs.google.com/spreadsheets/d/1xcZ50RHmDu-X2GYyOh7OUkJLhqBkNmJ9chydSBOcag4/export?gid=1222909420&format=csv)
+
+```{r, include=FALSE}
+source('orthogonal_design.R')
+```
+
+
+# Data Analysis
+
+## Regression Analysis
+
+First of all I imported the data
+
+```{r, message=FALSE}
+path <- 
+  'https://docs.google.com/spreadsheets/d/1xcZ50RHmDu-X2GYyOh7OUkJLhqBkNmJ9chydSBOcag4/export?gid=1222909420&format=csv'
+
+survey_data <- read_csv(path) %>% 
+  select(-Timestamp)
+```
+Afterwards, I created dummy variables for each attribute, excluding the first level from each since they'll be represented as the base values from the regression.
+
+```{r}
+dummified <- dummy_cols(code %>% mutate_all(as.factor),
+                        remove_first_dummy = T, 
+                        remove_selected_columns = T)
+```
+
+Then, proceed to transform data, building a list of dataframes where each dataframe corresponds to a surveyed person and each row represents a product configuration and columns represent attributes and value given to that configuration.
+
+
+```{r}
+scores_dfs <-  map(1:nrow(survey_data), ~dummified %>% 
+                     cbind(value = survey_data %>% slice(.x) %>% 
+                             t() %>% 
+                             as.vector()))
+```
+
+In order to make it clear, the first of those dataframes is shown at Table 1:
+
+```{r}
+kbl(scores_dfs[[1]], booktabs = T, 
+    caption = " Dummies for each configuration and values given by first surveyed person") %>%
+  kable_styling(latex_options = c("striped", "scale_down"))
+```
+
+
+Additionally, I binded all the dataframes by their rows, obtaining a general dataframe from the survey
+
+```{r}
+scores_total <- map_df(scores_dfs, ~.x)
+```
+
+
+In order to apply particular regressions to each user, I developed a function that applies the statistical model required and gets the coefficients which are later coherced into a tabular structure
+
+```{r}
+get_coeffs <- function(df){
+  model <- lm(value~.,df)
+  coeffs <- model$coefficients %>% 
+           t() %>% 
+            as.data.frame() 
+  
+  return(coeffs)
+}
+```
+
+Afterwards, I apply that function to each Dataframe, binding results by row, showing all partial values at Table 2
+
+```{r}
+partial_values <- map_dfr(scores_dfs, get_coeffs)
+kbl(partial_values, booktabs = T, caption = "partial values for each person") %>%
+  kable_styling(latex_options = c("striped", "scale_down"))
+```
+
+
+## Define relative importance for each person
+
+First we build a function that obtains the range of coefficients and zero for each level of the attributes after applying multiple regression model
+
+```{r}
+range_calculation <- function(coef_numbers){
+  range <- abs(max(0,model$coefficients[coef_numbers]) - min(0,model$coefficients[coef_numbers]))
+  return(range)
+}
+```
+
+
+Now I initialize an empty Dataframe, defining a vector of attributes and a list with the positions of coefficients from each attribute
+
+```{r}
+relative_importance_df <- data.frame()
+attributes <- c('price', 'size', 'backlight', 'water_resistant','internal_memory')
+coeff_positions <- list(2:4,5:6,7,8,9:11)
+```
+
+
+Finally I iterate over the dataframes applying the chosen statistical model, extracting coeffs and estimating their ranges, showing relative importance and populate the empty Dataframe. showing the relative importance for each attribute for each person at Table 3
+
+```{r, message=FALSE}
+for(i in 1:length(scores_dfs)){
+  
+  model <- lm(value~., scores_dfs[[i]])
+  ranges <- map_dfc(coeff_positions, ~ range_calculation(.x)) %>% set_names(str_c(attributes,'_range'))
+  ranges_sum <- sum(ranges)
+  relative_importance <- map_dfc(ranges, ~.x/ranges_sum) %>% 
+    mutate(id = i) %>% 
+    select(id, everything())
+  
+  relative_importance_df <- rbind(relative_importance_df, relative_importance)
+  
+}
+
+kbl(relative_importance_df, booktabs = T,
+    caption = "Relative importance for each attribute for each person") %>%
+kable_styling(latex_options = "striped")
+```
+
+## Partial value plots
+
+```{r,fig.height=15, fig.width= 10}
+plist <- list()
+for(i in 1:length(scores_dfs)){
+  
+  model <- lm(value~., scores_dfs[[i]])
+  plot_df <- data.frame(utils = c(0,model$coefficients[2:4]) %>% as.vector(), 
+                        label = c('$80', '$120', '$160', '$200'))
+  
+  plist[[i]] <- ggplot(plot_df)+
+    geom_line(aes(x = factor(label, levels = c('$80', '$120', '$160', '$200')), 
+                  y = utils, group = 1),
+              color = 'steelblue', size = 1.5)+
+    theme_bw()+
+    xlab(NULL)
+    
+  
+}
+do.call("grid.arrange", c(plist, ncol=4))
+```
+
+
+Being the base price the lowest price, the most seen behavior is that after a surge in price, utility falls showing high sensitivity to price that must be offset by different levels from other attributes 
+
+## Segmentation
+
+using a k-means alogrithm optimized by the silhouette method, it is advisable to divide the surveyed people into 5 groups
+
+```{r}
+data_scaled <- partial_values %>% 
+  select(-1) %>% 
+  scale() %>% 
+  data.frame()
+
+fviz_nbclust(data_scaled,nstart = 50, kmeans, method = "silhouette")+
+  labs(subtitle = "Silhouette method")
+
+```
+
+Now I run the k-means algorithm with the scaled values and reproject output data into 2 synthetic features built with PCA
+
+```{r}
+kmeans_clustering <- kmeans(data_scaled,centers = 5,nstart = 50)
+```
+
+```{r}
+res.pca <- prcomp(data_scaled, scale = TRUE)
+fviz_eig(res.pca)
+
+```
+
+```{r}
+fviz_pca_biplot(res.pca, label="var", habillage=kmeans_clustering$cluster)+
+  ggforce::geom_mark_ellipse(aes(fill = Groups,
+                                 color = Groups),expand = 1e-2)
+```
+
+## Conclusion
+
+From a visual standpoint, first group prioritize internal memory and back-lit panels, the second one has very high sensitivity to price so they demand a cheaper product no matter what. In contrast, group 3 has low price sensitivity so its advisable to offer them an uncompromised product.  group 4 seems pretty equilibrated and lots of memory it is for group 5.  
